@@ -1,0 +1,32 @@
+# 서버2: Redis Replica + Sentinel
+# 반드시 replica-conf/redis.conf / sentinel-conf/sentinel.conf 안의 <MASTER_IP> 를
+# 서버1(master)의 실제 IP로 교체한 뒤 실행하세요.
+#
+# conf 파일은 단일 파일이 아니라 디렉터리 단위로 마운트합니다. Redis/Sentinel이
+# 설정을 재작성(rewrite)할 때 임시 파일을 쓴 뒤 rename으로 덮어쓰는데, 단일 파일을
+# 직접 바인드 마운트하면 이 rename이 Permission denied로 실패할 수 있기 때문입니다.
+
+services:
+  redis-replica:
+    image: redis:7.2-alpine
+    container_name: redis-replica
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./replica-conf:/usr/local/etc/redis
+      - redis-replica-data:/data
+    command: redis-server /usr/local/etc/redis/redis.conf
+
+  sentinel:
+    image: redis:7.2-alpine
+    container_name: sentinel-2
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - redis-replica
+    volumes:
+      - ./sentinel-conf:/usr/local/etc/redis
+    command: redis-sentinel /usr/local/etc/redis/sentinel.conf
+
+volumes:
+  redis-replica-data:

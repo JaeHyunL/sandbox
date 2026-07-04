@@ -1,0 +1,81 @@
+# 로컬(단일 macOS 호스트) 시뮬레이션용 구성
+# 실제 배포 파일(server1-master/, server2-replica/, server3-sentinel-arbiter/)과는
+# 별개이며, network_mode: host 대신 일반 브릿지 네트워크 + 포트 매핑을 사용해
+# failover 로직만 빠르게 검증하기 위한 용도입니다.
+#
+# 각 서비스는 conf 파일 하나만 바인드 마운트하지 않고 "디렉터리 전체"를 마운트합니다.
+# Redis/Sentinel은 설정을 재작성(rewrite)할 때 임시 파일을 쓴 뒤 rename으로 덮어쓰는데,
+# 단일 파일을 직접 바인드 마운트하면 이 rename이 실패(Permission denied)할 수 있기
+# 때문입니다. 디렉터리를 통째로 마운트하면 문제없이 동작합니다.
+
+services:
+  redis-master:
+    image: redis:7.2-alpine
+    container_name: local-redis-master
+    networks: [redis-net]
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./master:/usr/local/etc/redis
+      - redis-master-data:/data
+    command: redis-server /usr/local/etc/redis/redis.conf
+
+  redis-replica:
+    image: redis:7.2-alpine
+    container_name: local-redis-replica
+    networks: [redis-net]
+    ports:
+      - "6380:6379"
+    depends_on:
+      - redis-master
+    volumes:
+      - ./replica:/usr/local/etc/redis
+      - redis-replica-data:/data
+    command: redis-server /usr/local/etc/redis/redis.conf
+
+  sentinel-1:
+    image: redis:7.2-alpine
+    container_name: local-sentinel-1
+    networks: [redis-net]
+    ports:
+      - "26379:26379"
+    depends_on:
+      - redis-master
+      - redis-replica
+    volumes:
+      - ./sentinel-1:/usr/local/etc/redis
+    command: redis-sentinel /usr/local/etc/redis/sentinel.conf
+
+  sentinel-2:
+    image: redis:7.2-alpine
+    container_name: local-sentinel-2
+    networks: [redis-net]
+    ports:
+      - "26380:26379"
+    depends_on:
+      - redis-master
+      - redis-replica
+    volumes:
+      - ./sentinel-2:/usr/local/etc/redis
+    command: redis-sentinel /usr/local/etc/redis/sentinel.conf
+
+  sentinel-3:
+    image: redis:7.2-alpine
+    container_name: local-sentinel-3
+    networks: [redis-net]
+    ports:
+      - "26381:26379"
+    depends_on:
+      - redis-master
+      - redis-replica
+    volumes:
+      - ./sentinel-3:/usr/local/etc/redis
+    command: redis-sentinel /usr/local/etc/redis/sentinel.conf
+
+networks:
+  redis-net:
+    driver: bridge
+
+volumes:
+  redis-master-data:
+  redis-replica-data:
