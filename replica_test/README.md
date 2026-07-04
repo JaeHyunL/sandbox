@@ -105,8 +105,8 @@ docker exec -it sentinel-2 redis-cli -p 26379 sentinel get-master-addr-by-name m
 
 ```bash
 cd local-test
-docker compose up -d
-docker compose ps                       # 5개 컨테이너(master, replica, sentinel x3) 확인
+docker compose up -d --build
+docker compose ps                       # 6개 컨테이너(master, replica, sentinel x3, webapp) 확인
 
 # failover 유발
 docker stop local-redis-master
@@ -118,18 +118,82 @@ docker exec local-redis-replica redis-cli info replication | grep role   # role:
 docker start local-redis-master
 sleep 10
 docker exec local-redis-master redis-cli info replication | grep role    # role:slave 확인
-
-docker compose down -v   # 정리
 ```
 
 이 구성은 일반 브릿지 네트워크 + 포트 매핑(6379/6380, 26379/26380/26381)을
-쓰고, Sentinel이 Docker 서비스명(`redis-master`)을 호스트명으로 인식하도록
-`sentinel resolve-hostnames yes` / `sentinel announce-hostnames yes`가 추가돼
-있습니다. **실제 배포 파일(`server*/`)에는 이 옵션이 없습니다** — 그쪽은
-호스트명 대신 실제 IP(`<MASTER_IP>`)를 쓰기 때문에 필요 없습니다.
+쓰지만, **각 서비스에 고정 IP**(172.28.0.10~15)를 부여해서 컨테이너가
+재시작/재생성돼도 주소가 절대 바뀌지 않도록 했습니다. Sentinel도 `sentinel
+monitor mymaster 172.28.0.10 6379 2`처럼 고정 IP를 직접 참조합니다 (hostname
+resolve 방식이 아님 — 그 이유는 바로 아래 참고). **실제 배포 파일(`server*/`)은
+`network_mode: host` + 실제 서버 IP(`<MASTER_IP>`)를 쓰므로 이미 고정 IP
+전제입니다.**
 
-이 저장소의 5개 컨테이너 기동, replication 확인, failover(마스터 다운→승격),
-구 마스터 복구 후 replica 자동 재편입까지 실제로 실행해 검증했습니다.
+> 처음엔 Sentinel이 Docker 서비스명(`redis-master`)을 호스트명으로 인식하게
+> `sentinel resolve-hostnames yes` / `announce-hostnames yes`를 썼었는데,
+> 이 조합이 **같은 컨테이너를 hostname("redis-master")과 IP(172.28.0.10) 두
+> 정체성으로 동시에 추적**하는 문제를 일으켜서, failover 후 해당 노드가
+> `replicaof redis-master 6379`(자기 자신)를 갖는 self-loop 버그로 실제
+> 재현됐습니다. 컨테이너 IP를 고정하고 Sentinel도 IP를 직접 참조하게
+> 바꿔서 해결했습니다.
+
+이 저장소의 6개 컨테이너 기동, replication 확인, **master→restart→(재승격된)
+replica 죽이기→원래 master 재승격까지 3단계 연쇄 failover**, 그리고 아래
+데모 앱을 통한 무중단 확인까지 실제로 실행해 검증했습니다.
+
+### 데모 웹앱 (`local-test/app/`)
+
+Sentinel을 실무에서 어떻게 쓰는지 보여주는 간단한 Flask 앱입니다. 핵심은
+**앱이 `redis-master`라는 고정 주소로 접속하지 않고, 매번 Sentinel에게 "지금
+master가 누구야?"를 물어서 접속한다**는 점입니다 (`redis.sentinel.Sentinel`,
+`app/app.py`). 그래서 failover가 일어나도 앱을 재시작/재배포할 필요가 없습니다.
+
+```bash
+curl localhost:5000/status                # sentinel이 보는 현재 master/replica 주소
+curl localhost:5000/set/foo/bar            # 브라우저 주소창에 쳐도 되는 GET 방식
+curl localhost:5000/get/foo                # master에서 읽기
+curl localhost:5000/get-from-replica/foo   # replica에서 읽기 (읽기 전용 확인용)
+
+# failover 중에도 앱이 계속 쓰기 가능한지 확인
+docker stop local-redis-master
+sleep 15
+curl localhost:5000/set/after_failover/still_works
+# 컨테이너 재시작 없이 바로 성공해야 정상 (Sentinel이 새 master를 알려줌)
+```
+
+### 상태가 꼬였을 때 (리셋)
+
+failover 테스트를 반복하면 Redis/Sentinel이 `CONFIG REWRITE`로 그 순간의 상태
+(옛 master IP, known-replica/known-sentinel 목록 등)를 conf 파일에 영구
+저장해버립니다. `docker compose down -v`로 컨테이너/볼륨/네트워크를 지워도 이
+conf 파일은 호스트에 그대로 남기 때문에, 나중에 `docker compose up`을 다시
+하면 죽은 IP를 참조하거나 master/replica 역할이 뒤바뀌는 등 이상 동작이
+나타날 수 있습니다. (`SET`이 두 노드 모두에서 `READONLY`로 실패하거나,
+`redis.conf`에 `replicaof redis-master 6379`처럼 자기 자신을 가리키는
+말도 안 되는 값이 박혀있으면 이 증상입니다.)
+
+이럴 때는 아래 스크립트로 conf 파일을 깨끗한 템플릿(`conf-templates/`)으로
+되돌리고 전체를 새로 띄우세요.
+
+```bash
+cd local-test
+./reset.sh
+```
+
+### failover 직후 `role:master`로 보이는 경우 (타이밍 이슈, 정상)
+
+죽었던 노드를 `docker start`로 되살린 직후 바로 `info replication`을 찍으면
+잠깐 `role:master`로 보일 수 있습니다. Sentinel이 "이 노드가 다시 살아났다"를
+감지하고 `REPLICAOF`를 내리기까지 down-after-milliseconds 이상의 시간이
+더 걸리기 때문입니다. 버그가 아니라 타이밍 문제이니 5~10초 더 기다렸다가
+다시 확인하세요.
+
+### failover 도중 `/set`이 잠깐 실패하는 경우 (정상)
+
+`"The previous master is now a slave"`나 `"No master found for 'mymaster'"`
+같은 에러가 잠깐 뜨는 건 failover가 진행 중이라는 뜻입니다 (감지 5초 +
+투표/승격 처리 시간). 몇 초 뒤 재시도하면 성공합니다. 위의 self-loop 버그를
+고친 뒤에는 정상적인 failover 시나리오에서 이 창이 보통 10~20초 안에
+끝납니다.
 
 ## 인증(requirepass) 추가가 필요해지면
 

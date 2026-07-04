@@ -7,12 +7,21 @@
 # Redis/Sentinel은 설정을 재작성(rewrite)할 때 임시 파일을 쓴 뒤 rename으로 덮어쓰는데,
 # 단일 파일을 직접 바인드 마운트하면 이 rename이 실패(Permission denied)할 수 있기
 # 때문입니다. 디렉터리를 통째로 마운트하면 문제없이 동작합니다.
+#
+# 모든 서비스에 고정 IP(ipv4_address)를 부여합니다. 고정 IP가 없으면 컨테이너를
+# 하나만 stop/start 하거나 재생성할 때 Docker가 다른 IP를 배정할 수 있는데,
+# Sentinel/Redis는 그 순간의 IP를 CONFIG REWRITE로 conf 파일에 영구 기록하기
+# 때문에, 나중에 IP가 밀리면 "자기 자신을 replica로 따라간다"처럼 완전히 깨진
+# 상태가 될 수 있습니다 (실제로 테스트 중 재현됨). 고정 IP는 운영 환경의 고정
+# 서버 IP와 동일한 역할을 해서 이 문제를 원천 차단합니다.
 
 services:
   redis-master:
     image: redis:7.2-alpine
     container_name: local-redis-master
-    networks: [redis-net]
+    networks:
+      redis-net:
+        ipv4_address: 172.28.0.10
     ports:
       - "6379:6379"
     volumes:
@@ -23,7 +32,9 @@ services:
   redis-replica:
     image: redis:7.2-alpine
     container_name: local-redis-replica
-    networks: [redis-net]
+    networks:
+      redis-net:
+        ipv4_address: 172.28.0.11
     ports:
       - "6380:6379"
     depends_on:
@@ -36,7 +47,9 @@ services:
   sentinel-1:
     image: redis:7.2-alpine
     container_name: local-sentinel-1
-    networks: [redis-net]
+    networks:
+      redis-net:
+        ipv4_address: 172.28.0.12
     ports:
       - "26379:26379"
     depends_on:
@@ -49,7 +62,9 @@ services:
   sentinel-2:
     image: redis:7.2-alpine
     container_name: local-sentinel-2
-    networks: [redis-net]
+    networks:
+      redis-net:
+        ipv4_address: 172.28.0.13
     ports:
       - "26380:26379"
     depends_on:
@@ -62,7 +77,9 @@ services:
   sentinel-3:
     image: redis:7.2-alpine
     container_name: local-sentinel-3
-    networks: [redis-net]
+    networks:
+      redis-net:
+        ipv4_address: 172.28.0.14
     ports:
       - "26381:26379"
     depends_on:
@@ -72,9 +89,26 @@ services:
       - ./sentinel-3:/usr/local/etc/redis
     command: redis-sentinel /usr/local/etc/redis/sentinel.conf
 
+  webapp:
+    build: ./app
+    container_name: local-webapp
+    networks:
+      redis-net:
+        ipv4_address: 172.28.0.15
+    ports:
+      - "5000:5000"
+    depends_on:
+      - sentinel-1
+      - sentinel-2
+      - sentinel-3
+    restart: unless-stopped
+
 networks:
   redis-net:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
 
 volumes:
   redis-master-data:
